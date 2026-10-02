@@ -9,8 +9,15 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .errors import DomainError, ValidationError
+from .relay import RelayService
 from .service import DomainService
 from .storage import Database
+
+
+def _path(path: str) -> tuple[str, tuple[str, ...]]:
+    parsed = urlparse(path)
+    parts = tuple(segment for segment in parsed.path.split("/") if segment)
+    return parsed, parts
 
 
 def route(service: DomainService, method: str, path: str, body: dict[str, Any] | None,
@@ -19,8 +26,15 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
 
     headers = headers or {}
     body = body or {}
-    parsed = urlparse(path)
+    parsed, parts = _path(path)
     actor_id = headers.get("X-Actor-Id", "")
+    relay = RelayService(service.database, service.clock)
+
+    def call(func, **kwargs):
+        result = func(actor_id=actor_id, **kwargs)
+        receipt, response = result
+        return 200 if receipt.replayed else 201, {**receipt.__dict__, "result": response}
+
     try:
         if method == "GET" and parsed.path == "/health":
             valid, count = service.verify_audit()
@@ -48,6 +62,73 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
             query = parse_qs(parsed.query)
             after = int(query.get("after_sequence", ["0"])[0])
             return 200, {"items": service.audit_events(after)}
+
+        # -- 接续协助平台 ---------------------------------------------------
+        if method == "POST" and parsed.path == "/relay/resources":
+            return call(relay.register_resource, **body)
+        if method == "POST" and parsed.path == "/relay/agent-grants":
+            return call(relay.grant_agent, **body)
+        if method == "POST" and parsed.path == "/assistances":
+            return call(relay.create_assistance, **body)
+        if method == "GET" and len(parts) == 2 and parts[0] == "assistances":
+            query = parse_qs(parsed.query)
+            version = int(query["version"][0]) if query.get("version") else None
+            return 200, relay.get_assistance(actor_id=actor_id, assistance_id=parts[1],
+                                            version=version)
+        if method == "POST" and len(parts) == 3 and parts[0] == "assistances" \
+                and parts[2] == "ticket-change":
+            return call(relay.change_ticket, assistance_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "assistances" \
+                and parts[2] == "complete":
+            return call(relay.confirm_completion, assistance_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "assistances" \
+                and parts[2] == "takeover":
+            return call(relay.takeover, assistance_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "assistances" \
+                and parts[2] == "takeover-resume":
+            return call(relay.resume_from_takeover, assistance_id=parts[1], **body)
+        if method == "GET" and len(parts) == 3 and parts[0] == "assistances" \
+                and parts[2] == "access-history":
+            return 200, relay.access_history(actor_id=actor_id, assistance_id=parts[1])
+        if method == "POST" and len(parts) == 3 and parts[0] == "legs" and parts[2] == "accept":
+            return call(relay.accept_leg, leg_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "legs" and parts[2] == "decline":
+            return call(relay.decline_leg, leg_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "legs" and parts[2] == "start":
+            return call(relay.start_leg, leg_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "legs" \
+                and parts[2] == "assign-resource":
+            return call(relay.assign_resource, leg_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "legs" and parts[2] == "no-show":
+            return call(relay.report_no_show, leg_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "legs" \
+                and parts[2] == "no-show-recover":
+            return call(relay.recover_no_show, leg_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "legs" and parts[2] == "delivered":
+            return call(relay.report_delivered, leg_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "legs" and parts[2] == "delay":
+            return call(relay.report_delay, leg_id=parts[1], **body)
+        if method == "GET" and len(parts) == 3 and parts[0] == "legs" and parts[2] == "needs":
+            return 200, relay.reveal_leg_needs(actor_id=actor_id, leg_id=parts[1],
+                                              **({"reason": body["reason"]} if body.get("reason") else {}))
+        if method == "POST" and len(parts) == 3 and parts[0] == "handoffs" and parts[2] == "arrive":
+            return call(relay.arrive_handoff, handoff_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "handoffs" and parts[2] == "receive":
+            return call(relay.receive_handoff, handoff_id=parts[1], **body)
+        if method == "POST" and len(parts) == 3 and parts[0] == "resources" and parts[2] == "failure":
+            return call(relay.report_equipment_failure, resource_id=parts[1], **body)
+        if method == "POST" and parsed.path == "/timeouts/sweep":
+            return 200, relay.sweep_timeouts()
+        if method == "POST" and len(parts) == 3 and parts[0] == "escalations" and parts[2] == "resolve":
+            return call(relay.resolve_escalation, escalation_id=parts[1], **body)
+        if method == "GET" and parsed.path == "/escalations":
+            query = parse_qs(parsed.query)
+            return 200, relay.list_escalations(
+                actor_id=actor_id,
+                assistance_id=query.get("assistance_id", [None])[0],
+                status=query.get("status", ["open"])[0])
+        if method == "GET" and parsed.path == "/board":
+            return 200, relay.board(actor_id=actor_id)
         return 404, {"error": "route_not_found", "message": "接口不存在"}
     except DomainError as exc:
         return exc.status, {"error": exc.code, "message": str(exc)}

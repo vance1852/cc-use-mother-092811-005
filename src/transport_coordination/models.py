@@ -49,3 +49,68 @@ class WriteReceipt:
     resource_type: str
     resource_id: str
     replayed: bool
+
+
+@dataclass(frozen=True)
+class NeedItem:
+    """旅客提交的一条协助需求及其可见范围。"""
+
+    need_id: str
+    assistance_id: str
+    need_key: str
+    category: str
+    detail: dict[str, Any]
+    visibility: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class Leg:
+    """服务链中的一段接续责任。"""
+
+    leg_id: str
+    assistance_id: str
+    version: int
+    ordinal: int
+    site_id: str
+    organization_id: str
+    from_location: str
+    to_location: str
+    scheduled_start: str
+    scheduled_end: str
+    acceptance_deadline: str
+    required_kinds: tuple[str, ...]
+    state: str
+    frozen: bool
+    source_version: int | None
+    resource_id: str | None
+
+
+@dataclass(frozen=True)
+class Handoff:
+    """相邻两段之间在固定交接位置的交接单。"""
+
+    handoff_id: str
+    assistance_id: str
+    version: int
+    from_ordinal: int
+    to_ordinal: int
+    location: str
+    deadline: str
+    state: str
+    frozen: bool
+
+
+@dataclass(frozen=True)
+class Escalation:
+    """一次超时、失约或紧急接管的升级记录。"""
+
+    escalation_id: str
+    assistance_id: str
+    version: int
+    ordinal: int
+    reason: str
+    level: int
+    status: str
+    note: str
+    opened_by: str
+    opened_at: str
